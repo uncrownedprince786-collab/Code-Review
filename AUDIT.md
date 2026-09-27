@@ -20,7 +20,7 @@ executable surface was read before installing.
   `check-rule-copies.js`, `check-versions.js`, `publish-openclaw-skills.js`
 - `package.json` (install lifecycle and dependency surface)
 
-**NOT audited** — out of scope for this pass. Do not read this file as clearing them:
+**Not audited in this first pass** — all but the last item are covered in Part 2 below:
 
 - `skills/`, `commands/`, `AGENTS.md` — the prompt text itself (cannot harm the machine,
   but it is what changes agent behaviour; see "Non-security caveat")
@@ -165,3 +165,142 @@ grep -n -E "writeFileSync|unlinkSync|rmSync|mkdirSync" hooks/*.js scripts/*.js
 
 Re-run after any upstream refresh. These findings apply only to the commit named at the
 top of this file.
+
+---
+
+# Part 2 — remaining executables and the skill prompt text
+
+**Audited:** 2026-09-28, same commit `e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156`.
+Second pass, closing the gaps Part 1 listed as out of scope.
+
+**Now audited in full:**
+
+- `.opencode/plugins/ponytail.mjs` (99 lines) — the npm `main` entry, runs under OpenCode
+- `pi-extension/index.js` (211 lines) + its `package.json`
+- `ponytail-mcp/` — `index.js` (52), `instructions.js` (26), + its `package.json`
+- `skills/` — all 6 `SKILL.md` files (383 lines): `ponytail`, `ponytail-audit`,
+  `ponytail-debt`, `ponytail-gain`, `ponytail-help`, `ponytail-review`
+
+**Still not audited:** `tests/`, `benchmarks/`, `commands/`, `docs/`, and the per-agent
+adapter folders. None of these execute in a Claude Code install.
+
+## Verdict on Part 2
+
+Executables: clean, and cleaner than Part 1's. Nothing here changes the install decision.
+The prompt text is well constructed and explicitly protects the things that matter.
+**But one finding below changes how this tool should be used — read finding 1.**
+
+## FINDING 1 — `/ponytail-audit` is NOT a security or correctness audit
+
+This is the most important line in either part of this document.
+
+Both review skills state their scope in their own words:
+
+> `ponytail-review`: "Scope: over-engineering and complexity only. **Correctness bugs,
+> security holes, and performance are explicitly out of scope.** Route them to a normal
+> review pass, not this one."
+
+> `ponytail-audit`: same boundary, repo-wide instead of per-diff.
+
+So `/ponytail-audit` and `/ponytail-review` hunt **bloat only** — dead code, reinvented
+stdlib, needless dependencies, one-implementation abstractions. They are explicitly
+instructed *not* to look for bugs, security holes, or performance problems. Their output
+is a list of things to delete, and they apply nothing.
+
+**Consequence:** running `/ponytail-audit` on a repo and getting `Lean already. Ship.`
+means "no over-engineering found." It does **not** mean the code is correct, and it does
+**not** mean the code is secure. Treating a clean ponytail-audit as a security sign-off
+would be a serious mistake.
+
+For actual correctness and security review, use a review pass built for it — Claude
+Code's own `/code-review` and `/security-review`, or an equivalent. Ponytail's own skill
+text tells you to do exactly this. The two are complements, not substitutes.
+
+## FINDING 2 — the off switch is narrower than the docs suggest
+
+The skills and README say ponytail turns off with `"stop ponytail"` or `"normal mode"`.
+In `ponytail-config.js`, `isDeactivationCommand()` requires the **entire message** to be
+one of those two phrases, after trimming case and trailing punctuation:
+
+```js
+return t === 'stop ponytail' || t === 'normal mode';
+```
+
+So these work: `stop ponytail` · `Stop ponytail.` · `normal mode`
+And these **do not**: `please stop ponytail` · `can you stop ponytail` ·
+`turn off ponytail` · `stop ponytail for this file`
+
+This is deliberate — matching the phrase anywhere in a message used to switch ponytail
+off mid-task on ordinary requests like "add a normal mode toggle" — and the tradeoff is
+reasonable. But it means the phrasing has to be exact. **The reliable off switch is the
+command `/ponytail off`**, which goes through a different code path and does not require
+an exact-match message. Use that one.
+
+## FINDING 3 — prefer `lite` or `full` over `ultra`
+
+The three intensity levels differ in how much pushback the agent gives:
+
+| Level | Behaviour |
+|---|---|
+| `lite` | Builds what you asked, mentions the lazier option in one line. You decide. |
+| `full` | Default. Enforces the ladder, stdlib and native first, shortest diff. |
+| `ultra` | "YAGNI extremist. Deletion before addition. Ship the one-liner and **challenge the rest of the requirement** in the same breath." |
+
+`ultra` is designed to argue with the requirement itself. That is useful when you can
+judge whether the pushback is right — and risky when you can't, because the failure mode
+is a requirement you actually needed getting talked away, which leaves no error message
+behind. **`full` is the sensible default; `lite` is the safest starting point.** Reach
+for `ultra` only on throwaway code.
+
+## FINDING 4 — tests are reduced by design
+
+The ruleset requires exactly one runnable check for non-trivial logic:
+
+> "Non-trivial logic (a branch, a loop, a parser, a money/security path) leaves ONE
+> runnable check behind ... No frameworks, no fixtures, no per-function suites unless
+> asked. Trivial one-liners need no test, YAGNI applies to tests too."
+
+This is a coherent position, not negligence — one real check beats a suite of generated
+tests that assert nothing. But it is a deliberate reduction in coverage, and "trivial"
+is judged by the agent, not by you. If you rely on tests as your safety net rather than
+on reading diffs, ask for tests explicitly; the ruleset yields immediately to an explicit
+request ("anything the user explicitly asked to keep").
+
+## What the prompt text gets right
+
+Worth recording, because it is the part that could have been bad and isn't:
+
+- **Security guards are explicitly fenced off.** "Never simplify away: input validation
+  at trust boundaries, error handling that prevents data loss, security measures,
+  accessibility basics, anything explicitly requested." Nothing in the ruleset tells the
+  agent to skip validation or weaken a security path.
+- **It forbids shortcutting comprehension**, at length: "Never lazy about understanding
+  the problem ... Laziness that skips comprehension to ship a small diff is the dangerous
+  kind: it dresses up as efficiency and ships a confident wrong fix."
+- **Bug fixes are pushed to root cause**, not symptom, with a concrete method (grep every
+  caller, fix the shared function once).
+- **It defers to the user.** "User insists on the full version → build it, no re-arguing."
+- **Deliberate corner-cuts must be marked** with a `ponytail:` comment naming the ceiling
+  and the upgrade path — so shortcuts are visible in the code rather than silent.
+
+## Executables in Part 2 — details
+
+- **`ponytail-mcp/`** — a read-only stdio MCP server that serves the ruleset as a prompt
+  and a tool. No network (stdio transport only), no filesystem writes, and the tool is
+  annotated `readOnlyHint: true, openWorldHint: false`. Two dependencies,
+  `@modelcontextprotocol/sdk ^1.26.0` and `zod ^3.23.0` — both mainstream and expected
+  for an MCP server. Marked `private: true` and excluded from the published npm package,
+  so `npm install` never pulls it or its dependencies. It only runs if you wire it up
+  deliberately.
+- **`pi-extension/index.js`** — zero dependencies, and zero filesystem writes.
+- **`.opencode/plugins/ponytail.mjs`** — writes only the same mode flag file under
+  `$XDG_CONFIG_HOME`/`~/.config`. No network, no process execution.
+- **Across all three: no `fetch`, no `http`/`https`, no `child_process`, no `eval`,
+  no `new Function`, and no environment reads beyond `XDG_CONFIG_HOME`.**
+
+## Bottom line for both parts
+
+Safe to install. Use `full` (or `lite` to start), turn it off with `/ponytail off`, and
+**do not treat `/ponytail-audit` as a security or correctness review** — it is a
+bloat-finder by its own explicit definition, and the tool's own text says to route
+correctness and security to a separate pass.
